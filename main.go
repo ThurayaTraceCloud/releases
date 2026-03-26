@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ var (
 	githubOrg   = envOrDefault("GITHUB_ORG", "ThurayaTraceCloud")
 	githubRepo  = envOrDefault("GITHUB_REPO", "agent")
 	githubToken = os.Getenv("GITHUB_TOKEN")
+	httpClient  = &http.Client{Timeout: 5 * time.Minute}
 )
 
 func envOrDefault(key, fallback string) string {
@@ -41,7 +43,7 @@ func fetchLatestTag() (string, error) {
 		req.Header.Set("Authorization", "Bearer "+githubToken)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -81,7 +83,56 @@ func downloadURL(version, filename string) string {
 		githubOrg, githubRepo, version, filename)
 }
 
+// proxyAsset fetches the GitHub release asset using the token and streams it to the client.
+func proxyAsset(w http.ResponseWriter, r *http.Request, version, filename string) {
+	assetURL := downloadURL(version, filename)
+
+	req, err := http.NewRequest("GET", assetURL, nil)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		log.Printf("error creating request for %s: %v", assetURL, err)
+		return
+	}
+	req.Header.Set("Accept", "application/octet-stream")
+	if githubToken != "" {
+		req.Header.Set("Authorization", "Bearer "+githubToken)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		http.Error(w, "failed to fetch asset", http.StatusBadGateway)
+		log.Printf("error fetching %s: %v", assetURL, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		http.NotFound(w, r)
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		log.Printf("github returned %d for %s", resp.StatusCode, assetURL)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	if resp.ContentLength > 0 {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", resp.ContentLength))
+	}
+	w.WriteHeader(http.StatusOK)
+
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		log.Printf("error streaming %s: %v", filename, err)
+	}
+}
+
 func main() {
+	if githubToken == "" {
+		log.Println("WARNING: GITHUB_TOKEN not set — private repo assets will not be accessible")
+	}
+
 	refreshLatestTag()
 	go func() {
 		for range time.Tick(5 * time.Minute) {
@@ -116,7 +167,7 @@ func main() {
 			http.Error(w, "latest version not available", http.StatusServiceUnavailable)
 			return
 		}
-		http.Redirect(w, r, downloadURL(tag, filename), http.StatusFound)
+		proxyAsset(w, r, tag, filename)
 	})
 
 	mux.HandleFunc("/agent/", func(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +182,7 @@ func main() {
 		if version == "latest" {
 			return // handled by /agent/latest/ handler
 		}
-		http.Redirect(w, r, downloadURL(version, filename), http.StatusFound)
+		proxyAsset(w, r, version, filename)
 	})
 
 	addr := ":8080"
