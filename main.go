@@ -246,6 +246,49 @@ func main() {
 		proxyAsset(w, r, version, filename)
 	})
 
+	// /v1/... mirrors /agent/... — customers discovered via the install.sh flow
+	// hit /v1/latest/version and /v1/<version>/<file>.deb|.rpm. Same GitHub
+	// Release assets on both prefixes; /v1/ is the name customers see in
+	// get.thurayatrace.cloud/v1/install.sh.
+
+	mux.HandleFunc("/v1/latest/version", func(w http.ResponseWriter, r *http.Request) {
+		tag := getLatestTag()
+		if tag == "" {
+			http.Error(w, "latest version not available", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprintln(w, tag)
+	})
+
+	mux.HandleFunc("/v1/latest/", func(w http.ResponseWriter, r *http.Request) {
+		filename := strings.TrimPrefix(r.URL.Path, "/v1/latest/")
+		if filename == "" || filename == "version" {
+			return // handled by more specific route
+		}
+		tag := getLatestTag()
+		if tag == "" {
+			http.Error(w, "latest version not available", http.StatusServiceUnavailable)
+			return
+		}
+		proxyAsset(w, r, tag, filename)
+	})
+
+	mux.HandleFunc("/v1/", func(w http.ResponseWriter, r *http.Request) {
+		// /v1/{version}/{filename}
+		path := strings.TrimPrefix(r.URL.Path, "/v1/")
+		parts := strings.SplitN(path, "/", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			http.NotFound(w, r)
+			return
+		}
+		version, filename := parts[0], parts[1]
+		if version == "latest" {
+			return // handled by /v1/latest/ handler
+		}
+		proxyAsset(w, r, version, filename)
+	})
+
 	addr := ":8080"
 	log.Printf("releases proxy listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, mux))
