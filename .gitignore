@@ -1,2 +1,5 @@
 releases-proxy
 vendor/
+
+# Pre-Helm scratch k8s manifests (kept locally, not part of this repo)
+platform-k8s/
